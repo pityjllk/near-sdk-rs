@@ -325,21 +325,34 @@ impl BorshSchema for Promise {
 enum PromiseSubtype {
     Single(Rc<PromiseSingle>),
     Joint(Rc<PromiseJoint>),
+    Yielded(PromiseIndex),
 }
 
 impl Promise {
     /// Create a promise that acts on the given account.
     /// Uses low-level [`crate::env::promise_batch_create`]
     pub fn new(account_id: AccountId) -> Self {
-        Self {
-            subtype: PromiseSubtype::Single(Rc::new(PromiseSingle {
-                account_id,
-                actions: RefCell::new(vec![]),
-                after: RefCell::new(None),
-                promise_index: RefCell::new(None),
-            })),
-            should_return: RefCell::new(false),
-        }
+        Self::new_with_subtype(PromiseSubtype::Single(Rc::new(PromiseSingle {
+            account_id,
+            actions: RefCell::new(vec![]),
+            after: RefCell::new(None),
+            promise_index: RefCell::new(None),
+        })))
+    }
+
+    const fn new_with_subtype(subtype: PromiseSubtype) -> Self {
+        Self { subtype, should_return: RefCell::new(false) }
+    }
+
+    pub fn yield_create(
+        function_name: &str,
+        arguments: impl AsRef<[u8]>,
+        gas: Gas,
+        weight: GasWeight,
+    ) -> (Self, YieldId) {
+        let (promise_index, yield_id) =
+            crate::env::promise_yield_create_id(function_name.as_ref(), arguments, gas, weight);
+        (Self::new_with_subtype(PromiseSubtype::Yielded(promise_index)), yield_id)
     }
 
     fn add_action(self, action: PromiseAction) -> Self {
@@ -347,6 +360,9 @@ impl Promise {
             PromiseSubtype::Single(x) => x.actions.borrow_mut().push(action),
             PromiseSubtype::Joint(_) => {
                 crate::env::panic_str("Cannot add action to a joint promise.")
+            }
+            PromiseSubtype::Yielded(_) => {
+                crate::env::panic_str("Cannot add action to a yielded promise.")
             }
         }
         self
@@ -658,6 +674,7 @@ impl Promise {
                 *after = Some(self)
             }
             PromiseSubtype::Joint(_) => crate::env::panic_str("Cannot callback joint promise."),
+            PromiseSubtype::Yielded(_) => crate::env::panic_str("Cannot callback yielded promise."),
         }
         other
     }
@@ -741,6 +758,7 @@ impl Promise {
         let res = match &self.subtype {
             PromiseSubtype::Single(x) => x.construct_recursively(),
             PromiseSubtype::Joint(x) => x.construct_recursively()?,
+            PromiseSubtype::Yielded(promise_index) => *promise_index,
         };
         if *self.should_return.borrow() {
             crate::env::promise_return(res);
@@ -789,6 +807,21 @@ impl schemars::JsonSchema for Promise {
         // Since promises are untyped, for now we represent Promise results with the schema
         // `true` which matches everything (i.e. always passes validation)
         schemars::schema::Schema::Bool(true)
+    }
+}
+
+use crate::near;
+#[near(inside_nearsdk, serializers = [json, borsh])]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
+pub struct YieldId(
+    #[serde_as(as = "::serde_with::base64::Base64")]
+    #[cfg_attr(feature = "abi", schemars(with = "String"))]
+    pub(crate) CryptoHash,
+);
+
+impl YieldId {
+    pub fn resume(self, data: impl AsRef<[u8]>) -> bool {
+        crate::env::promise_yield_resume(&self.0, data)
     }
 }
 
