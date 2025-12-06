@@ -9,7 +9,7 @@ use std::num::NonZeroU128;
 use std::rc::Rc;
 
 use crate::env::migrate_to_allowance;
-#[cfg(any(feature = "deterministic-account-ids", feature = "global-contracts"))]
+// #[cfg(any(feature = "deterministic-account-ids", feature = "global-contracts"))]
 use crate::CryptoHash;
 use crate::{AccountId, Gas, GasWeight, NearToken, PromiseIndex, PublicKey};
 

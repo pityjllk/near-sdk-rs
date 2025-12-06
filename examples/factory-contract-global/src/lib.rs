@@ -1,5 +1,9 @@
 use near_sdk::json_types::{Base58CryptoHash, Base64VecU8};
-use near_sdk::{env, ext_contract, near, AccountId, CryptoHash, Promise, PromiseError};
+use near_sdk::{env, ext_contract, near, AccountId, CryptoHash, Promise, PromiseError, NearToken};
+use near_sdk::state_init::{StateInit, StateInitV1};
+use near_sdk::GlobalContractId;
+use std::collections::BTreeMap;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 #[derive(Default)]
 #[near(contract_state)]
@@ -123,6 +127,142 @@ impl GlobalFactoryContract {
             Err(_) => Err("Failed to set status"),
         }
     }
+
+    /// Compute the deterministic account ID for a contract deployed with state_init by code hash.
+    /// This is a view function that allows predicting the deployment address before actual deployment.
+    ///
+    /// # Arguments
+    /// * `code_hash` - The hash of the global contract code
+    /// * `state_data` - Key-value pairs for initial state (base64-encoded strings)
+    ///
+    /// # Returns
+    /// The deterministic AccountId where the contract will be deployed
+    pub fn compute_state_init_address_by_hash(
+        &self,
+        code_hash: Base58CryptoHash,
+        data: BTreeMap<Vec<u8>, Vec<u8>>,
+    ) -> AccountId {
+
+        // Create StateInit structure
+        let state_init = StateInit::V1(StateInitV1 {
+            code: GlobalContractId::CodeHash(code_hash.into()),
+            data,
+        });
+
+        // Return the derived account ID
+        state_init.derive_account_id()
+    }
+
+    /// Compute the deterministic account ID for a contract deployed with state_init by deployer account.
+    /// This is a view function that allows predicting the deployment address before actual deployment.
+    ///
+    /// # Arguments
+    /// * `deployer_account_id` - The account that deployed the global contract
+    /// * `state_data` - Key-value pairs for initial state (base64-encoded strings)
+    ///
+    /// # Returns
+    /// The deterministic AccountId where the contract will be deployed
+    pub fn compute_state_init_address_by_account(
+        &self,
+        deployer_account_id: AccountId,
+        data: BTreeMap<Vec<u8>, Vec<u8>>,
+    ) -> AccountId {
+        // Convert base64 strings to bytes
+
+        // Create StateInit structure
+        let state_init = StateInit::V1(StateInitV1 {
+            code: GlobalContractId::AccountId(deployer_account_id),
+            data
+        });
+
+        // Return the derived account ID
+        state_init.derive_account_id()
+    }
+
+    /// Deploy a global contract instance with state_init using a code hash.
+    /// This creates a deterministic account address based on the code hash and initial state.
+    ///
+    /// # Arguments
+    /// * `code_hash` - The hash of the global contract code
+    /// * `state_data` - Key-value pairs for initial state (base64-encoded strings)
+    /// * `deposit` - Amount to deposit to the new account
+    ///
+    /// # Returns
+    /// Promise for the deployment operation
+    #[payable]
+    pub fn deploy_global_contract_with_state_init_by_hash(
+        &mut self,
+        code_hash: Base58CryptoHash,
+        state_data: BTreeMap<String, String>,
+        deposit: NearToken,
+    ) -> Promise {
+        // Convert base64 strings to bytes
+        let data: BTreeMap<Vec<u8>, Vec<u8>> = state_data
+            .into_iter()
+            .map(|(k, v)| {
+                let key = BASE64.decode(&k).expect("Invalid base64 key");
+                let value = BASE64.decode(&v).expect("Invalid base64 value");
+                (key, value)
+            })
+            .collect();
+
+        // Create StateInit
+        let state_init = StateInit::V1(StateInitV1 {
+            code: GlobalContractId::CodeHash(code_hash.into()),
+            data,
+        });
+
+        // Derive deterministic account ID
+        let target_account_id = state_init.derive_account_id();
+
+        // Deploy
+        Promise::new(target_account_id)
+            .create_account()
+            .add_full_access_key(env::signer_account_pk())
+            .state_init(state_init, deposit)
+    }
+
+    /// Deploy a global contract instance with state_init using a deployer account ID.
+    /// This creates a deterministic account address based on the deployer account and initial state.
+    ///
+    /// # Arguments
+    /// * `deployer_account_id` - The account that deployed the global contract
+    /// * `state_data` - Key-value pairs for initial state (base64-encoded strings)
+    /// * `deposit` - Amount to deposit to the new account
+    ///
+    /// # Returns
+    /// Promise for the deployment operation
+    #[payable]
+    pub fn deploy_global_contract_with_state_init_by_account(
+        &mut self,
+        deployer_account_id: AccountId,
+        state_data: BTreeMap<String, String>,
+        deposit: NearToken,
+    ) -> Promise {
+        // Convert base64 strings to bytes
+        let data: BTreeMap<Vec<u8>, Vec<u8>> = state_data
+            .into_iter()
+            .map(|(k, v)| {
+                let key = BASE64.decode(&k).expect("Invalid base64 key");
+                let value = BASE64.decode(&v).expect("Invalid base64 value");
+                (key, value)
+            })
+            .collect();
+
+        // Create StateInit with AccountId variant
+        let state_init = StateInit::V1(StateInitV1 {
+            code: GlobalContractId::AccountId(deployer_account_id),
+            data,
+        });
+
+        let target_account_id = state_init.derive_account_id();
+
+        // Deploy
+        Promise::new(target_account_id)
+            .create_account()
+            .add_full_access_key(env::signer_account_pk())
+            .state_init(state_init, deposit)
+    }
 }
 
 #[cfg(test)]
@@ -174,5 +314,72 @@ mod tests {
         assert_eq!(contracts.len(), 1);
         assert_eq!(contracts[0].0, "test_contract");
         assert_eq!(contracts[0].1, expected_hash);
+    }
+
+    #[test]
+    fn test_compute_state_init_address_deterministic() {
+        let context = get_context(accounts(1));
+        testing_env!(context);
+
+        let contract = GlobalFactoryContract::default();
+        let code_hash: Base58CryptoHash =
+            "EoFMvgbdQttJ3vLsVBcgZaWbhEGrJnpqda85qtbu7LbL".parse().unwrap();
+
+        let mut state_data = BTreeMap::new();
+        state_data.insert(
+            BASE64.encode(b"key1"),
+            BASE64.encode(b"value1"),
+        );
+
+        // Same inputs should produce same output (deterministic)
+        let addr1 = contract.compute_state_init_address_by_hash(
+            code_hash.clone(),
+            state_data.clone(),
+        );
+        let addr2 = contract.compute_state_init_address_by_hash(
+            code_hash.clone(),
+            state_data.clone(),
+        );
+
+        assert_eq!(addr1, addr2, "Addresses should be deterministic");
+
+        // Different state should produce different address
+        let mut different_data = BTreeMap::new();
+        different_data.insert(
+            BASE64.encode(b"key1"),
+            BASE64.encode(b"value2"),  // Different value
+        );
+
+        let addr3 = contract.compute_state_init_address_by_hash(code_hash, different_data);
+
+        assert_ne!(addr1, addr3, "Different state should produce different addresses");
+    }
+
+    #[test]
+    fn test_compute_state_init_hash_vs_account() {
+        let context = get_context(accounts(1));
+        testing_env!(context);
+
+        let contract = GlobalFactoryContract::default();
+        let code_hash: Base58CryptoHash =
+            "EoFMvgbdQttJ3vLsVBcgZaWbhEGrJnpqda85qtbu7LbL".parse().unwrap();
+        let deployer: AccountId = "deployer.near".parse().unwrap();
+
+        let state_data = BTreeMap::new();
+
+        // Same state data with different GlobalContractId variants should differ
+        let addr_hash = contract.compute_state_init_address_by_hash(
+            code_hash,
+            state_data.clone(),
+        );
+        let addr_account = contract.compute_state_init_address_by_account(
+            deployer,
+            state_data,
+        );
+
+        assert_ne!(
+            addr_hash, addr_account,
+            "Hash and Account variants should produce different addresses"
+        );
     }
 }
